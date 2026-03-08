@@ -128,7 +128,7 @@ def generate_excel(data, filename, sheet_name):
     writer.close()
     return path
 
-# --- NEW: PDF & QR GENERATION ---
+# --- PDF & QR GENERATION ---
 def create_worker_card(p, base_url):
     img = Image.new('RGB', (600, 300), color=(255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -317,7 +317,8 @@ elif menu == "👥 TEAM & TRIPS":
 
     with tab3:
         st.markdown("### 🖨️ Ultra HD Print Center")
-        perm_url = "https://your-app-name.streamlit.app/" # CHANGE THIS TO YOUR ACTUAL URL
+        # --- PERMANENT LINK ADDED BELOW ---
+        perm_url = "https://plant-tracker-vanua8refkhappxfm3rjvwu.streamlit.app/" 
         base_url = st.text_input("App Network URL (Permanent):", value=perm_url)
         
         c1, c2 = st.columns(2)
