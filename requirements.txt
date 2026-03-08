@@ -1,7 +1,8 @@
 streamlit
 pandas
 sqlalchemy
-google-generativeai
+xlsxwriter
 qrcode
 pillow
-XlsxWriter
+fpdf2
+google-generativeai
