@@ -10,9 +10,10 @@ from sqlalchemy.orm import relationship, declarative_base, sessionmaker
 from sqlalchemy.sql import func
 import google.generativeai as genai
 
-# --- NEW IMPORTS FOR QR ---
+# --- NEW IMPORTS ---
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
+from fpdf import FPDF
 
 # --- CONFIGURATION ---
 DB_FILE = "plant_v3.db"
@@ -82,51 +83,19 @@ st.set_page_config(page_title="Al-Yamama Engineering", layout="wide", page_icon=
 
 # --- UTILS ---
 def get_detailed_history(person_id):
-    """Fetches combined trips and overtime data sorted by date."""
     trips = db.query(Trip).filter(Trip.driver_id == person_id).all()
     ots = db.query(Overtime).filter(Overtime.worker_id == person_id).all()
-    
     combined = {}
     for t in trips:
         d_str = t.date.strftime("%Y-%m-%d")
         combined.setdefault(d_str, {"Date": d_str, "Trips": 0, "OT Hours": 0.0})
         combined[d_str]["Trips"] += t.trip_count
-        
     for o in ots:
         d_str = o.date.strftime("%Y-%m-%d")
         combined.setdefault(d_str, {"Date": d_str, "Trips": 0, "OT Hours": 0.0})
         combined[d_str]["OT Hours"] += o.hours
-        
     return sorted(list(combined.values()), key=lambda x: x["Date"], reverse=True)
 
-# ==========================================
-# --- PUBLIC QR VIEW INTERCEPTOR ---
-# ==========================================
-if "worker_id" in st.query_params:
-    worker_id = st.query_params["worker_id"]
-    p = db.query(Person).filter(Person.id == worker_id).first()
-    
-    if p:
-        st.markdown(f"<h1 style='text-align:center;'>👷 {p.name}</h1>", unsafe_allow_html=True)
-        st.markdown(f"<h3 style='text-align:center; color:gray;'>{p.designation}</h3>", unsafe_allow_html=True)
-        st.divider()
-        
-        history = get_detailed_history(p.id)
-        t_trips = sum(item["Trips"] for item in history)
-        t_ot = sum(item["OT Hours"] for item in history)
-        
-        c1, c2 = st.columns(2)
-        c1.metric("🚛 Total Trips", t_trips)
-        c2.metric("⏱️ Total Overtime (Hrs)", t_ot)
-        
-        st.subheader("📅 Work History (By Date)")
-        st.table(history)
-        st.info("✅ This is your live work record. Scanned via Office QR.")
-    else:
-        st.error("Worker record not found.")
-    st.stop()
-
-# --- UTILS ---
 def save_file(uploaded_file):
     if uploaded_file is None: return None
     path = os.path.join(ASSETS_DIR, uploaded_file.name)
@@ -159,28 +128,83 @@ def generate_excel(data, filename, sheet_name):
     writer.close()
     return path
 
+# --- NEW: PDF & QR GENERATION ---
 def create_worker_card(p, base_url):
-    img = Image.new('RGB', (600, 250), color=(255, 255, 255))
+    img = Image.new('RGB', (600, 300), color=(255, 255, 255))
     draw = ImageDraw.Draw(img)
     qr_url = f"{base_url}?worker_id={p.id}"
-    qr = qrcode.make(qr_url).resize((200, 200))
-    img.paste(qr, (380, 25))
+    qr = qrcode.make(qr_url).resize((220, 220))
+    img.paste(qr, (350, 40))
     if p.photo_path and os.path.exists(p.photo_path):
         try:
-            pic = Image.open(p.photo_path).resize((150, 150))
-            img.paste(pic, (30, 50))
+            pic = Image.open(p.photo_path).resize((180, 180))
+            img.paste(pic, (30, 40))
         except: pass
-    draw.text((200, 80), f"Name: {p.name}", fill=(0, 0, 0))
-    draw.text((200, 110), f"Role: {p.designation}", fill=(100, 100, 100))
-    draw.text((200, 150), "Scan QR with phone", fill=(31, 119, 180))
-    draw.text((200, 170), "to view your trips & OT", fill=(31, 119, 180))
-    draw.rectangle([0, 0, 599, 249], outline=(0, 210, 255), width=4)
+    draw.text((30, 230), f"NAME: {p.name.upper()}", fill=(0, 0, 0))
+    draw.text((30, 255), f"ROLE: {p.designation.upper()}", fill=(100, 100, 100))
+    draw.rectangle([0, 0, 599, 299], outline=(0, 210, 255), width=6)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-settings = get_settings()
+def create_joint_pdf(staff, base_url):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=10)
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.set_text_color(0, 150, 200)
+    pdf.cell(190, 15, txt="AL-YAMAMA ENGINEERING STAFF CODES", ln=True, align='C')
+    pdf.ln(5)
+    
+    x_start, y_start = 10, 30
+    card_w, card_h = 90, 55
+    for i, p in enumerate(staff):
+        col, row = i % 2, (i // 2) % 4
+        if i > 0 and i % 8 == 0:
+            pdf.add_page()
+            y_start = 20
+        x, y = x_start + (col * (card_w + 5)), y_start + (row * (card_h + 5))
+        pdf.set_fill_color(245, 250, 255)
+        pdf.rect(x, y, card_w, card_h, 'DF')
+        pdf.set_draw_color(0, 210, 255)
+        pdf.rect(x, y, card_w, card_h)
+        if p.photo_path and os.path.exists(p.photo_path):
+            pdf.image(p.photo_path, x + 2, y + 2, 28, 28)
+        qr_url = f"{base_url}?worker_id={p.id}"
+        qr_img = qrcode.make(qr_url)
+        temp_qr = f"temp_{p.id}.png"
+        qr_img.save(temp_qr)
+        pdf.image(temp_qr, x + 58, y + 2, 30, 30)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Arial", 'B', 10)
+        pdf.set_xy(x + 2, y + 35); pdf.cell(40, 5, p.name[:20].upper())
+        pdf.set_font("Arial", '', 8)
+        pdf.set_text_color(100, 100, 100)
+        pdf.set_xy(x + 2, y + 42); pdf.cell(40, 5, p.designation[:25])
+        if os.path.exists(temp_qr): os.remove(temp_qr)
+    return pdf.output(dest='S')
 
+# ==========================================
+# --- PUBLIC QR VIEW INTERCEPTOR ---
+# ==========================================
+if "worker_id" in st.query_params:
+    worker_id = st.query_params["worker_id"]
+    p = db.query(Person).filter(Person.id == worker_id).first()
+    if p:
+        st.markdown(f"<h1 style='text-align:center;'>👷 {p.name}</h1>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='text-align:center; color:gray;'>{p.designation}</h3>", unsafe_allow_html=True)
+        st.divider()
+        history = get_detailed_history(p.id)
+        c1, c2 = st.columns(2)
+        c1.metric("🚛 Total Trips", sum(item["Trips"] for item in history))
+        c2.metric("⏱️ Total Overtime (Hrs)", sum(item["OT Hours"] for item in history))
+        st.subheader("📅 Work History")
+        st.table(history)
+    else: st.error("Worker record not found.")
+    st.stop()
+
+# --- THEME & UI ---
+settings = get_settings()
 if "theme" not in st.session_state: st.session_state.theme = "dark"
 def toggle_theme(): st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
 
@@ -227,10 +251,9 @@ if menu == "🏠 HOME":
 elif menu == "👥 TEAM & TRIPS":
     st.markdown("<h2>STAFF MANAGEMENT</h2>", unsafe_allow_html=True)
     tab1, tab2, tab3 = st.tabs(["👥 CARDS VIEW", "📝 ADD & FULL LIST", "🖨️ QR PRINT CARDS"])
+    staff = db.query(Person).all()
     
     with tab1:
-        st.subheader("Team Cards")
-        staff = db.query(Person).all()
         for i in range(0, len(staff), 4):
             cols = st.columns(4)
             for j, col in enumerate(cols):
@@ -238,46 +261,25 @@ elif menu == "👥 TEAM & TRIPS":
                     p = staff[i+j]
                     with col:
                         with st.container(border=True):
-                            # --- CLICK PHOTO TO SEE DETAIL ---
                             if p.photo_path and os.path.exists(p.photo_path):
-                                if st.button("👁️ View Details", key=f"v_{p.id}"):
-                                    st.session_state.view_worker = p.id
+                                if st.button("👁️ View", key=f"v_{p.id}"): st.session_state.view_worker = p.id
                                 st.image(p.photo_path, width=80)
                             else: st.write("👤 No Photo")
-                            
                             st.write(f"**{p.name}**")
                             st.caption(f"{p.designation}")
-                            
-                            total_trips = db.query(func.sum(Trip.trip_count)).filter(Trip.driver_id == p.id).scalar() or 0
-                            total_ot = db.query(func.sum(Overtime.hours)).filter(Overtime.worker_id == p.id).scalar() or 0
-                            st.markdown(f"<div class='stat-box'>🚛 Trips: {total_trips} <br> ⏱️ OT: {total_ot} hrs</div>", unsafe_allow_html=True)
-                            
+                            t_trips = db.query(func.sum(Trip.trip_count)).filter(Trip.driver_id == p.id).scalar() or 0
+                            t_ot = db.query(func.sum(Overtime.hours)).filter(Overtime.worker_id == p.id).scalar() or 0
+                            st.markdown(f"<div class='stat-box'>🚛 Trips: {t_trips} | ⏱️ OT: {t_ot}</div>", unsafe_allow_html=True)
                             if st.button("🗑️ Delete", key=f"del_{p.id}"): delete_person(p.id); st.rerun()
 
-        # --- DETAILED MODAL VIEW ---
         if "view_worker" in st.session_state:
             p_detail = db.query(Person).get(st.session_state.view_worker)
             if p_detail:
                 st.divider()
                 st.markdown(f"### 📊 Detailed Record: {p_detail.name}")
                 history = get_detailed_history(p_detail.id)
-                
-                # Search by Date
-                search_date = st.text_input("🔍 Search by Date (YYYY-MM-DD)", "")
-                if search_date:
-                    history = [h for h in history if search_date in h["Date"]]
-                
-                # Professional Metrics on Top
-                total_t = sum(h["Trips"] for h in history)
-                total_h = sum(h["OT Hours"] for h in history)
-                m1, m2 = st.columns(2)
-                m1.metric("Big Total Trips", total_t)
-                m2.metric("Big Total Hours", total_h)
-                
                 st.dataframe(history, use_container_width=True, hide_index=True)
-                if st.button("❌ Close Sheet"):
-                    del st.session_state.view_worker
-                    st.rerun()
+                if st.button("❌ Close"): del st.session_state.view_worker; st.rerun()
 
     with tab2:
         c1, c2 = st.columns([1, 2])
@@ -287,7 +289,7 @@ elif menu == "👥 TEAM & TRIPS":
                 name = st.text_input("Name")
                 role = st.text_input("Designation")
                 phone = st.text_input("Phone")
-                wa = st.text_input("WhatsApp Number")
+                wa = st.text_input("WhatsApp")
                 pic = st.file_uploader("Photo", type=['jpg','png'])
                 if st.form_submit_button("Add Person"):
                     path = save_file(pic)
@@ -302,59 +304,55 @@ elif menu == "👥 TEAM & TRIPS":
                 t_tab, o_tab = st.tabs(["🚛 TRIPS", "⏱️ OVERTIME"])
                 with t_tab:
                     with st.form("add_trip"):
-                        d_date = st.date_input("Select Date", key="t_date")
-                        d_count = st.number_input("Number of Trips", min_value=1, value=1)
+                        d_date = st.date_input("Date", key="t_date")
+                        d_count = st.number_input("Trips", min_value=1, value=1)
                         if st.form_submit_button("Save Trip"):
-                            db.add(Trip(driver_id=p.id, date=d_date, trip_count=d_count))
-                            db.commit(); st.success("Logged!"); st.rerun()
+                            db.add(Trip(driver_id=p.id, date=d_date, trip_count=d_count)); db.commit(); st.success("Logged!"); st.rerun()
                 with o_tab:
                     with st.form("add_ot_d"):
-                        o_date = st.date_input("Select Date", key="o_date_d")
-                        o_hrs = st.number_input("Overtime Hours", min_value=0.5, step=0.5)
+                        o_date = st.date_input("Date", key="o_date_d")
+                        o_hrs = st.number_input("Hours", min_value=0.5, step=0.5)
                         if st.form_submit_button("Save OT"):
-                            db.add(Overtime(worker_id=p.id, date=o_date, hours=o_hrs, reason="Standard"))
-                            db.commit(); st.success("Logged!"); st.rerun()
+                            db.add(Overtime(worker_id=p.id, date=o_date, hours=o_hrs, reason="Standard")); db.commit(); st.success("Logged!"); st.rerun()
 
     with tab3:
-        st.markdown("### 🖨️ Office Print Center")
-        try:
-            local_ip = socket.gethostbyname(socket.gethostname())
-            default_url = f"http://{local_ip}:8501"
-        except: default_url = "http://localhost:8501"
-        base_url = st.text_input("App Network URL:", value=default_url)
-        if st.button("📦 Download ALL ZIP"):
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, "w") as zf:
-                for p in staff:
-                    card_bytes = create_worker_card(p, base_url)
-                    zf.writestr(f"{p.name}_QR_Card.png", card_bytes)
-            st.download_button("📥 Click to Save ZIP", zip_buf.getvalue(), "Team_QR_Cards.zip", "application/zip")
+        st.markdown("### 🖨️ Ultra HD Print Center")
+        perm_url = "https://your-app-name.streamlit.app/" # CHANGE THIS TO YOUR ACTUAL URL
+        base_url = st.text_input("App Network URL (Permanent):", value=perm_url)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📄 Generate Joint PDF Sheet"):
+                pdf_bytes = create_joint_pdf(staff, base_url)
+                st.download_button("📥 Download PDF (One Sheet)", pdf_bytes, "Staff_QR_Sheet.pdf", "application/pdf")
+        with c2:
+            if st.button("📦 Download Individual PNGs (ZIP)"):
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, "w") as zf:
+                    for p in staff: zf.writestr(f"{p.name}_QR.png", create_worker_card(p, base_url))
+                st.download_button("📥 Save ZIP", zip_buf.getvalue(), "Individual_Cards.zip")
         
         st.divider()
         cols = st.columns(3)
         for i, p in enumerate(staff):
             with cols[i % 3]:
-                card_bytes = create_worker_card(p, base_url)
-                st.image(card_bytes, use_container_width=True)
-                st.download_button(f"Download {p.name}", card_bytes, f"{p.name}_QR.png", "image/png", key=f"dl_qr_{p.id}")
+                card = create_worker_card(p, base_url)
+                st.image(card, use_container_width=True)
+                st.download_button(f"Save {p.name}", card, f"{p.name}_QR.png", "image/png", key=f"dl_{p.id}")
 
 elif menu == "🏗️ CONCRETE DATA":
     st.markdown("<h2>CONCRETE PRODUCTION</h2>", unsafe_allow_html=True)
     with st.expander("➕ ADD RECORD", expanded=True):
         with st.form("conc_form"):
             c1, c2, c3, c4 = st.columns(4)
-            d = c1.date_input("Date")
-            site = c2.text_input("Site Name")
+            d, site = c1.date_input("Date"), c2.text_input("Site Name")
             grade = c3.selectbox("Grade", ["C10", "C20", "C30", "C35", "C40", "C50", "Blinding"])
             qty = c4.number_input("Quantity (m3)")
             if st.form_submit_button("SAVE RECORD"):
-                db.add(ConcreteRecord(date=d, site_name=site, grade=grade, quantity=qty))
-                db.commit(); st.success("Saved!"); st.rerun()
-    st.divider()
-    m = st.selectbox("Select Month", range(1, 13), index=datetime.now().month-1)
+                db.add(ConcreteRecord(date=d, site_name=site, grade=grade, quantity=qty)); db.commit(); st.success("Saved!"); st.rerun()
+    m = st.selectbox("Month", range(1, 13), index=datetime.now().month-1)
     records = db.query(ConcreteRecord).filter(func.extract('month', ConcreteRecord.date) == m).all()
-    rec_data = [{"ID": r.id, "Date": r.date.date(), "Site": r.site_name, "Grade": r.grade, "Quantity": r.quantity} for r in records]
-    st.data_editor(rec_data, num_rows="dynamic", use_container_width=True, key="conc_edit")
+    st.data_editor([{"ID": r.id, "Date": r.date.date(), "Site": r.site_name, "Grade": r.grade, "Quantity": r.quantity} for r in records], use_container_width=True)
 
 elif menu == "📊 EXPORT":
     st.title("Reports Center")
@@ -363,21 +361,18 @@ elif menu == "📊 EXPORT":
     if st.button("Generate Excel"):
         p = db.query(Person).filter_by(name=target).first()
         history = get_detailed_history(p.id)
-        fname = generate_excel(history, f"{p.name}_Full_Report", "Records")
+        fname = generate_excel(history, f"{p.name}_Report", "Records")
         with open(fname, "rb") as f: st.download_button("Download", f, file_name=fname)
 
 elif menu == "⚙️ SETTINGS":
     st.title("Settings")
-    key_input = st.text_input("AI API Key", value=settings.ai_api_key if settings.ai_api_key else "", type="password")
+    key_input = st.text_input("AI API Key", value=settings.ai_api_key or "", type="password")
     if st.button("SAVE KEY"): settings.ai_api_key = key_input; db.commit(); st.success("Saved!")
     with st.form("sets"):
-        comp = st.text_input("Company", settings.company_name)
-        op = st.text_input("Operator", settings.operator_name)
-        ban = st.file_uploader("Banner", type=['jpg','png'])
-        log = st.file_uploader("Logo", type=['jpg','png'])
+        comp, op = st.text_input("Company", settings.company_name), st.text_input("Operator", settings.operator_name)
+        ban, log = st.file_uploader("Banner", type=['jpg','png']), st.file_uploader("Logo", type=['jpg','png'])
         if st.form_submit_button("SAVE VISUALS"):
-            settings.company_name = comp
-            settings.operator_name = op
+            settings.company_name, settings.operator_name = comp, op
             if ban: settings.banner_path = save_file(ban)
             if log: settings.logo_path = save_file(log)
             db.commit(); st.rerun()
@@ -396,7 +391,7 @@ elif menu == "🤖 REAL AI BOT":
             with st.chat_message("user"): st.write(prompt)
             conc_sum = db.query(func.sum(ConcreteRecord.quantity)).scalar() or 0
             try:
-                response = model.generate_content(f"Context: Plant {settings.company_name}, Concrete={conc_sum}. Question: {prompt}")
+                response = model.generate_content(f"Plant {settings.company_name}, Concrete={conc_sum}. Question: {prompt}")
                 bot_reply = response.text
             except: bot_reply = "AI Error."
             st.session_state.chat_history.append(("assistant", bot_reply))
