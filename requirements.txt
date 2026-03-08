@@ -1,0 +1,7 @@
+streamlit
+pandas
+sqlalchemy
+google-generativeai
+qrcode
+pillow
+XlsxWriter
