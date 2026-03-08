@@ -182,7 +182,9 @@ def create_joint_pdf(staff, base_url):
         pdf.set_text_color(100, 100, 100)
         pdf.set_xy(x + 2, y + 42); pdf.cell(40, 5, p.designation[:25])
         if os.path.exists(temp_qr): os.remove(temp_qr)
-    return pdf.output(dest='S')
+    
+    # --- FIX: CONVERT TO BYTES ---
+    return bytes(pdf.output(dest='S'))
 
 # ==========================================
 # --- PUBLIC QR VIEW INTERCEPTOR ---
@@ -317,7 +319,8 @@ elif menu == "👥 TEAM & TRIPS":
 
     with tab3:
         st.markdown("### 🖨️ Ultra HD Print Center")
-        # --- PERMANENT LINK ADDED BELOW ---
+        
+        # --- PERMANENT LINK LOCK ---
         perm_url = "https://plant-tracker-vanua8refkhappxfm3rjvwu.streamlit.app/" 
         base_url = st.text_input("App Network URL (Permanent):", value=perm_url)
         
