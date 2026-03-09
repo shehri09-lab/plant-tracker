@@ -183,7 +183,6 @@ def create_joint_pdf(staff, base_url):
         pdf.set_xy(x + 2, y + 42); pdf.cell(40, 5, p.designation[:25])
         if os.path.exists(temp_qr): os.remove(temp_qr)
     
-    # --- FIX: CONVERT TO BYTES ---
     return bytes(pdf.output(dest='S'))
 
 # ==========================================
@@ -202,7 +201,7 @@ if "worker_id" in st.query_params:
         c2.metric("⏱️ Total Overtime (Hrs)", sum(item["OT Hours"] for item in history))
         st.subheader("📅 Work History")
         st.table(history)
-    else: st.error("Worker record not found.")
+    else: st.error("Worker record not found. Make sure you are scanning the right code and the database is updated on the cloud.")
     st.stop()
 
 # --- THEME & UI ---
@@ -252,7 +251,7 @@ if menu == "🏠 HOME":
 
 elif menu == "👥 TEAM & TRIPS":
     st.markdown("<h2>STAFF MANAGEMENT</h2>", unsafe_allow_html=True)
-    tab1, tab2, tab3 = st.tabs(["👥 CARDS VIEW", "📝 ADD & FULL LIST", "🖨️ QR PRINT CARDS"])
+    tab1, tab2, tab3 = st.tabs(["👥 CARDS VIEW", "📝 ADD/EDIT WORKERS", "🖨️ QR PRINT CARDS"])
     staff = db.query(Person).all()
     
     with tab1:
@@ -264,7 +263,6 @@ elif menu == "👥 TEAM & TRIPS":
                     with col:
                         with st.container(border=True):
                             if p.photo_path and os.path.exists(p.photo_path):
-                                if st.button("👁️ View", key=f"v_{p.id}"): st.session_state.view_worker = p.id
                                 st.image(p.photo_path, width=80)
                             else: st.write("👤 No Photo")
                             st.write(f"**{p.name}**")
@@ -272,7 +270,11 @@ elif menu == "👥 TEAM & TRIPS":
                             t_trips = db.query(func.sum(Trip.trip_count)).filter(Trip.driver_id == p.id).scalar() or 0
                             t_ot = db.query(func.sum(Overtime.hours)).filter(Overtime.worker_id == p.id).scalar() or 0
                             st.markdown(f"<div class='stat-box'>🚛 Trips: {t_trips} | ⏱️ OT: {t_ot}</div>", unsafe_allow_html=True)
-                            if st.button("🗑️ Delete", key=f"del_{p.id}"): delete_person(p.id); st.rerun()
+                            
+                            b1, b2, b3 = st.columns(3)
+                            if b1.button("👁️", key=f"v_{p.id}", help="View Details"): st.session_state.view_worker = p.id
+                            if b2.button("✏️", key=f"ed_{p.id}", help="Edit Worker"): st.session_state.edit_worker = p.id
+                            if b3.button("🗑️", key=f"del_{p.id}", help="Delete"): delete_person(p.id); st.rerun()
 
         if "view_worker" in st.session_state:
             p_detail = db.query(Person).get(st.session_state.view_worker)
@@ -281,7 +283,26 @@ elif menu == "👥 TEAM & TRIPS":
                 st.markdown(f"### 📊 Detailed Record: {p_detail.name}")
                 history = get_detailed_history(p_detail.id)
                 st.dataframe(history, use_container_width=True, hide_index=True)
-                if st.button("❌ Close"): del st.session_state.view_worker; st.rerun()
+                if st.button("❌ Close View"): del st.session_state.view_worker; st.rerun()
+                
+        if "edit_worker" in st.session_state:
+            p_edit = db.query(Person).get(st.session_state.edit_worker)
+            if p_edit:
+                st.divider()
+                st.markdown(f"### ✏️ Editing Worker: {p_edit.name}")
+                with st.form("edit_worker_form"):
+                    e_name = st.text_input("Name", p_edit.name)
+                    e_role = st.text_input("Designation", p_edit.designation)
+                    e_phone = st.text_input("Phone", p_edit.phone)
+                    if st.form_submit_button("Save Changes"):
+                        p_edit.name = e_name
+                        p_edit.designation = e_role
+                        p_edit.phone = e_phone
+                        db.commit()
+                        del st.session_state.edit_worker
+                        st.success("Updated successfully!")
+                        st.rerun()
+                if st.button("Cancel Edit"): del st.session_state.edit_worker; st.rerun()
 
     with tab2:
         c1, c2 = st.columns([1, 2])
@@ -298,12 +319,12 @@ elif menu == "👥 TEAM & TRIPS":
                     db.add(Person(name=name, designation=role, phone=phone, whatsapp=wa, photo_path=path))
                     db.commit(); st.success("Added!"); st.rerun()
         with c2:
-            st.markdown("### 📝 Log Work")
+            st.markdown("### 📝 Log & Edit Work")
             p_list = {p.name: p for p in staff}
             target = st.selectbox("Select Person", list(p_list.keys()) if p_list else [])
             if target:
                 p = p_list[target]
-                t_tab, o_tab = st.tabs(["🚛 TRIPS", "⏱️ OVERTIME"])
+                t_tab, o_tab, manage_tab = st.tabs(["🚛 ADD TRIPS", "⏱️ ADD OVERTIME", "⚙️ MANAGE HISTORY"])
                 with t_tab:
                     with st.form("add_trip"):
                         d_date = st.date_input("Date", key="t_date")
@@ -316,11 +337,33 @@ elif menu == "👥 TEAM & TRIPS":
                         o_hrs = st.number_input("Hours", min_value=0.5, step=0.5)
                         if st.form_submit_button("Save OT"):
                             db.add(Overtime(worker_id=p.id, date=o_date, hours=o_hrs, reason="Standard")); db.commit(); st.success("Logged!"); st.rerun()
+                with manage_tab:
+                    st.write("**Edit or Delete Trips**")
+                    person_trips = db.query(Trip).filter(Trip.driver_id == p.id).all()
+                    if person_trips:
+                        trip_data = [{"ID": t.id, "Date": t.date.date(), "Trips": t.trip_count} for t in person_trips]
+                        edited_trips = st.data_editor(trip_data, key=f"edit_trips_{p.id}", use_container_width=True)
+                        if st.button("💾 Save Trip Changes", key=f"save_trip_{p.id}"):
+                            for row in edited_trips:
+                                tr = db.query(Trip).get(row["ID"])
+                                if tr: tr.trip_count = row["Trips"]
+                            db.commit(); st.success("Trips Updated!"); st.rerun()
+                    else: st.info("No trips found.")
+                    
+                    st.write("**Edit or Delete Overtime**")
+                    person_ot = db.query(Overtime).filter(Overtime.worker_id == p.id).all()
+                    if person_ot:
+                        ot_data = [{"ID": o.id, "Date": o.date.date(), "Hours": o.hours} for o in person_ot]
+                        edited_ot = st.data_editor(ot_data, key=f"edit_ot_{p.id}", use_container_width=True)
+                        if st.button("💾 Save Overtime Changes", key=f"save_ot_{p.id}"):
+                            for row in edited_ot:
+                                otr = db.query(Overtime).get(row["ID"])
+                                if otr: otr.hours = float(row["Hours"])
+                            db.commit(); st.success("Overtime Updated!"); st.rerun()
+                    else: st.info("No overtime found.")
 
     with tab3:
         st.markdown("### 🖨️ Ultra HD Print Center")
-        
-        # --- PERMANENT LINK LOCK ---
         perm_url = "https://plant-tracker-vanua8refkhappxfm3rjvwu.streamlit.app/" 
         base_url = st.text_input("App Network URL (Permanent):", value=perm_url)
         
@@ -346,7 +389,7 @@ elif menu == "👥 TEAM & TRIPS":
 
 elif menu == "🏗️ CONCRETE DATA":
     st.markdown("<h2>CONCRETE PRODUCTION</h2>", unsafe_allow_html=True)
-    with st.expander("➕ ADD RECORD", expanded=True):
+    with st.expander("➕ ADD RECORD", expanded=False):
         with st.form("conc_form"):
             c1, c2, c3, c4 = st.columns(4)
             d, site = c1.date_input("Date"), c2.text_input("Site Name")
@@ -354,9 +397,28 @@ elif menu == "🏗️ CONCRETE DATA":
             qty = c4.number_input("Quantity (m3)")
             if st.form_submit_button("SAVE RECORD"):
                 db.add(ConcreteRecord(date=d, site_name=site, grade=grade, quantity=qty)); db.commit(); st.success("Saved!"); st.rerun()
+    
+    st.markdown("### 📝 Edit Existing Records")
     m = st.selectbox("Month", range(1, 13), index=datetime.now().month-1)
     records = db.query(ConcreteRecord).filter(func.extract('month', ConcreteRecord.date) == m).all()
-    st.data_editor([{"ID": r.id, "Date": r.date.date(), "Site": r.site_name, "Grade": r.grade, "Quantity": r.quantity} for r in records], use_container_width=True)
+    
+    if records:
+        record_data = [{"ID": r.id, "Date": r.date.date(), "Site": r.site_name, "Grade": r.grade, "Quantity": r.quantity} for r in records]
+        
+        edited_records = st.data_editor(record_data, use_container_width=True, key="conc_editor")
+        
+        if st.button("💾 Save Concrete Changes"):
+            for row in edited_records:
+                rec = db.query(ConcreteRecord).get(row["ID"])
+                if rec:
+                    rec.site_name = row["Site"]
+                    rec.grade = row["Grade"]
+                    rec.quantity = float(row["Quantity"])
+            db.commit()
+            st.success("Concrete records updated successfully!")
+            st.rerun()
+    else:
+        st.info("No concrete records for this month.")
 
 elif menu == "📊 EXPORT":
     st.title("Reports Center")
