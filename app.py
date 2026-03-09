@@ -4,6 +4,7 @@ import os
 import socket
 import io
 import zipfile
+import urllib.parse  # Required for WhatsApp links
 from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, ForeignKey, Text
 from sqlalchemy.orm import relationship, declarative_base, sessionmaker
@@ -201,7 +202,7 @@ if "worker_id" in st.query_params:
         c2.metric("⏱️ Total Overtime (Hrs)", sum(item["OT Hours"] for item in history))
         st.subheader("📅 Work History")
         st.table(history)
-    else: st.error("Worker record not found. Make sure you are scanning the right code and the database is updated on the cloud.")
+    else: st.error("Worker record not found.")
     st.stop()
 
 # --- THEME & UI ---
@@ -282,6 +283,26 @@ elif menu == "👥 TEAM & TRIPS":
                 st.divider()
                 st.markdown(f"### 📊 Detailed Record: {p_detail.name}")
                 history = get_detailed_history(p_detail.id)
+                
+                # --- UPDATED: WHATSAPP REPORT BUTTON ---
+                if history and p_detail.whatsapp:
+                    latest = history[0]
+                    # Create English & Arabic message
+                    wa_msg = (
+                        f"🏗️ *AL-YAMAMA ENGINEERING REPORT*\n\n"
+                        f"Hello *{p_detail.name}*,\n"
+                        f"The last day Date {latest['Date']} you have {latest['Trips']} trips and {latest['OT Hours']} hours. Thank you.\n"
+                        f"Sincerely, {settings.operator_name}.\n\n"
+                        f"مرحباً *{p_detail.name}*،\n"
+                        f"في تاريخ {latest['Date']} كان لديك {latest['Trips']} رحلات و {latest['OT Hours']} ساعات عمل إضافية. شكراً لك.\n"
+                        f"مع خالص التحيات، {settings.operator_name}."
+                    )
+                    encoded_wa = urllib.parse.quote(wa_msg)
+                    wa_url = f"https://wa.me/{p_detail.whatsapp}?text={encoded_wa}"
+                    st.link_button(f"🟢 SEND REPORT TO WHATSAPP", wa_url, use_container_width=True)
+                elif not p_detail.whatsapp:
+                    st.warning("No WhatsApp number saved for this worker.")
+
                 st.dataframe(history, use_container_width=True, hide_index=True)
                 if st.button("❌ Close View"): del st.session_state.view_worker; st.rerun()
                 
@@ -294,14 +315,11 @@ elif menu == "👥 TEAM & TRIPS":
                     e_name = st.text_input("Name", p_edit.name)
                     e_role = st.text_input("Designation", p_edit.designation)
                     e_phone = st.text_input("Phone", p_edit.phone)
+                    e_wa = st.text_input("WhatsApp (Country code first, e.g. 96650...)", p_edit.whatsapp)
                     if st.form_submit_button("Save Changes"):
-                        p_edit.name = e_name
-                        p_edit.designation = e_role
-                        p_edit.phone = e_phone
-                        db.commit()
-                        del st.session_state.edit_worker
-                        st.success("Updated successfully!")
-                        st.rerun()
+                        p_edit.name, p_edit.designation = e_name, e_role
+                        p_edit.phone, p_edit.whatsapp = e_phone, e_wa
+                        db.commit(); del st.session_state.edit_worker; st.rerun()
                 if st.button("Cancel Edit"): del st.session_state.edit_worker; st.rerun()
 
     with tab2:
@@ -312,7 +330,7 @@ elif menu == "👥 TEAM & TRIPS":
                 name = st.text_input("Name")
                 role = st.text_input("Designation")
                 phone = st.text_input("Phone")
-                wa = st.text_input("WhatsApp")
+                wa = st.text_input("WhatsApp (Include Country Code)")
                 pic = st.file_uploader("Photo", type=['jpg','png'])
                 if st.form_submit_button("Add Person"):
                     path = save_file(pic)
@@ -348,7 +366,6 @@ elif menu == "👥 TEAM & TRIPS":
                                 tr = db.query(Trip).get(row["ID"])
                                 if tr: tr.trip_count = row["Trips"]
                             db.commit(); st.success("Trips Updated!"); st.rerun()
-                    else: st.info("No trips found.")
                     
                     st.write("**Edit or Delete Overtime**")
                     person_ot = db.query(Overtime).filter(Overtime.worker_id == p.id).all()
@@ -360,7 +377,6 @@ elif menu == "👥 TEAM & TRIPS":
                                 otr = db.query(Overtime).get(row["ID"])
                                 if otr: otr.hours = float(row["Hours"])
                             db.commit(); st.success("Overtime Updated!"); st.rerun()
-                    else: st.info("No overtime found.")
 
     with tab3:
         st.markdown("### 🖨️ Ultra HD Print Center")
@@ -371,7 +387,7 @@ elif menu == "👥 TEAM & TRIPS":
         with c1:
             if st.button("📄 Generate Joint PDF Sheet"):
                 pdf_bytes = create_joint_pdf(staff, base_url)
-                st.download_button("📥 Download PDF (One Sheet)", pdf_bytes, "Staff_QR_Sheet.pdf", "application/pdf")
+                st.download_button("📥 Download PDF", pdf_bytes, "Staff_QR_Sheet.pdf", "application/pdf")
         with c2:
             if st.button("📦 Download Individual PNGs (ZIP)"):
                 zip_buf = io.BytesIO()
@@ -385,7 +401,6 @@ elif menu == "👥 TEAM & TRIPS":
             with cols[i % 3]:
                 card = create_worker_card(p, base_url)
                 st.image(card, use_container_width=True)
-                st.download_button(f"Save {p.name}", card, f"{p.name}_QR.png", "image/png", key=f"dl_{p.id}")
 
 elif menu == "🏗️ CONCRETE DATA":
     st.markdown("<h2>CONCRETE PRODUCTION</h2>", unsafe_allow_html=True)
@@ -404,21 +419,13 @@ elif menu == "🏗️ CONCRETE DATA":
     
     if records:
         record_data = [{"ID": r.id, "Date": r.date.date(), "Site": r.site_name, "Grade": r.grade, "Quantity": r.quantity} for r in records]
-        
         edited_records = st.data_editor(record_data, use_container_width=True, key="conc_editor")
-        
         if st.button("💾 Save Concrete Changes"):
             for row in edited_records:
                 rec = db.query(ConcreteRecord).get(row["ID"])
                 if rec:
-                    rec.site_name = row["Site"]
-                    rec.grade = row["Grade"]
-                    rec.quantity = float(row["Quantity"])
-            db.commit()
-            st.success("Concrete records updated successfully!")
-            st.rerun()
-    else:
-        st.info("No concrete records for this month.")
+                    rec.site_name, rec.grade, rec.quantity = row["Site"], row["Grade"], float(row["Quantity"])
+            db.commit(); st.success("Updated!"); st.rerun()
 
 elif menu == "📊 EXPORT":
     st.title("Reports Center")
