@@ -5,7 +5,7 @@ import socket
 import io
 import zipfile
 import urllib.parse  # Required for WhatsApp links
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, ForeignKey, Text
 from sqlalchemy.orm import relationship, declarative_base, sessionmaker
 from sqlalchemy.sql import func
@@ -73,6 +73,19 @@ class ConcreteRecord(Base):
     quantity = Column(Float)
     notes = Column(String)
 
+# --- NEW MODELS FOR ADMINISTRATION & SHIFTS ---
+class AdminSettings(Base):
+    __tablename__ = 'admin_settings'
+    id = Column(Integer, primary_key=True)
+    engineer_name = Column(String, default="Engineer Hussain")
+    engineer_whatsapp = Column(String)
+
+class Shift(Base):
+    __tablename__ = 'shifts'
+    id = Column(Integer, primary_key=True)
+    worker_id = Column(Integer, ForeignKey('people.id'))
+    shift_name = Column(String)
+
 # --- DB INIT ---
 engine = create_engine(f"sqlite:///{DB_FILE}", connect_args={"check_same_thread": False})
 Base.metadata.create_all(engine)
@@ -111,9 +124,19 @@ def get_settings():
         db.commit()
     return s
 
+def get_admin_settings():
+    s = db.query(AdminSettings).first()
+    if not s:
+        s = AdminSettings()
+        db.add(s)
+        db.commit()
+    return s
+
 def delete_person(person_id):
     p = db.query(Person).get(person_id)
     if p:
+        # Clear shifts for this person to prevent errors
+        db.query(Shift).filter(Shift.worker_id == person_id).delete()
         db.delete(p)
         db.commit()
         return True
@@ -207,6 +230,8 @@ if "worker_id" in st.query_params:
 
 # --- THEME & UI ---
 settings = get_settings()
+admin_settings = get_admin_settings()
+
 if "theme" not in st.session_state: st.session_state.theme = "dark"
 def toggle_theme(): st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
 
@@ -235,7 +260,7 @@ with st.sidebar:
         if settings.operator_photo_path and os.path.exists(settings.operator_photo_path): st.image(settings.operator_photo_path, caption=settings.operator_name, width=120)
     if st.button("Switch Theme"): toggle_theme(); st.rerun()
     st.divider()
-    menu = st.radio("NAVIGATION", ["🏠 HOME", "👥 TEAM & TRIPS", "🏗️ CONCRETE DATA", "📊 EXPORT", "⚙️ SETTINGS", "🤖 REAL AI BOT"])
+    menu = st.radio("NAVIGATION", ["🏠 HOME", "👥 TEAM & TRIPS", "🏗️ CONCRETE DATA", "📊 EXPORT", "👑 ADMINISTRATION", "⚙️ SETTINGS", "🤖 REAL AI BOT"])
 
 if menu == "🏠 HOME":
     if settings.banner_path and os.path.exists(settings.banner_path): st.image(settings.banner_path, use_container_width=True)
@@ -284,10 +309,8 @@ elif menu == "👥 TEAM & TRIPS":
                 st.markdown(f"### 📊 Detailed Record: {p_detail.name}")
                 history = get_detailed_history(p_detail.id)
                 
-                # --- UPDATED: WHATSAPP REPORT BUTTON ---
                 if history and p_detail.whatsapp:
                     latest = history[0]
-                    # Create English & Arabic message
                     wa_msg = (
                         f"🏗️ *AL-YAMAMA ENGINEERING REPORT*\n\n"
                         f"Hello *{p_detail.name}*,\n"
@@ -436,6 +459,107 @@ elif menu == "📊 EXPORT":
         history = get_detailed_history(p.id)
         fname = generate_excel(history, f"{p.name}_Report", "Records")
         with open(fname, "rb") as f: st.download_button("Download", f, file_name=fname)
+
+elif menu == "👑 ADMINISTRATION":
+    st.title("Administration & Shift Management")
+    
+    tab1, tab2, tab3 = st.tabs(["📞 ENGINEER DETAILS", "🔄 SHIFT SETTINGS", "📤 SEND ENGINEER REPORT"])
+    
+    with tab1:
+        st.subheader("Configure Engineer Contact")
+        with st.form("admin_settings_form"):
+            e_name = st.text_input("Engineer Name", admin_settings.engineer_name)
+            e_wa = st.text_input("Engineer WhatsApp (Include country code, e.g. 964...)", admin_settings.engineer_whatsapp or "")
+            if st.form_submit_button("Save Engineer Details"):
+                admin_settings.engineer_name = e_name
+                admin_settings.engineer_whatsapp = e_wa
+                db.commit()
+                st.success("Engineer details saved successfully!")
+                st.rerun()
+                
+    with tab2:
+        st.subheader("Assign Team Members to Shifts")
+        people = db.query(Person).all()
+        shifts = db.query(Shift).all()
+        
+        # Easy lookup dictionaries
+        p_options = {p.id: p.name for p in people}
+        day_workers = [s.worker_id for s in shifts if s.shift_name == "Day"]
+        night_workers = [s.worker_id for s in shifts if s.shift_name == "Night"]
+        
+        with st.form("shift_management_form"):
+            st.write("Drag and click to add or remove members from their shifts.")
+            
+            # Use multiselect for easy shift management
+            selected_day = st.multiselect("☀️ Day Shift Workers", options=list(p_options.keys()), format_func=lambda x: p_options[x], default=[p for p in day_workers if p in p_options])
+            selected_night = st.multiselect("🌙 Night Shift Workers", options=list(p_options.keys()), format_func=lambda x: p_options[x], default=[p for p in night_workers if p in p_options])
+            
+            if st.form_submit_button("💾 Save Shifts"):
+                db.query(Shift).delete() # Clear old shifts
+                
+                for w_id in selected_day:
+                    db.add(Shift(worker_id=w_id, shift_name="Day"))
+                for w_id in selected_night:
+                    if w_id not in selected_day: # Prevent assigning to both simultaneously
+                        db.add(Shift(worker_id=w_id, shift_name="Night"))
+                        
+                db.commit()
+                st.success("Shifts Updated Successfully!")
+                st.rerun()
+                
+    with tab3:
+        st.subheader("Daily Overtime Report")
+        
+        if not admin_settings.engineer_whatsapp:
+            st.error("⚠️ Please add Engineer Hussain's WhatsApp number in the 'ENGINEER DETAILS' tab first.")
+        else:
+            # Default to yesterday
+            yesterday = datetime.now().date() - timedelta(days=1)
+            report_date = st.date_input("Select Date for Report", yesterday)
+            
+            report_type = st.radio("How would you like to format the report?", ["Simple Format", "Shift-Wise Format"])
+            
+            if st.button("Generate & Send WhatsApp Report"):
+                # Fetch overtime data for the selected date
+                ots = db.query(Overtime).filter(func.date(Overtime.date) == report_date).all()
+                
+                if not ots:
+                    st.warning(f"No overtime records found for {report_date}.")
+                else:
+                    msg = f"🏗️ *This is an automatic overtime message from AL-Yamama Concrete plant*\n"
+                    msg += f"📅 *Date:* {report_date}\n"
+                    msg += f"👨‍💼 *To:* {admin_settings.engineer_name}\n\n"
+                    
+                    if report_type == "Simple Format":
+                        for o in ots:
+                            msg += f"🔹 {o.worker.name}: {o.hours} Hours\n"
+                    else:
+                        shift_map = {s.worker_id: s.shift_name for s in db.query(Shift).all()}
+                        day_ots = [o for o in ots if shift_map.get(o.worker_id) == "Day"]
+                        night_ots = [o for o in ots if shift_map.get(o.worker_id) == "Night"]
+                        unassigned_ots = [o for o in ots if shift_map.get(o.worker_id) not in ["Day", "Night"]]
+                        
+                        if day_ots:
+                            msg += "☀️ *DAY SHIFT*\n"
+                            for o in day_ots: msg += f"🔹 {o.worker.name}: {o.hours} Hours\n"
+                            msg += "\n"
+                        if night_ots:
+                            msg += "🌙 *NIGHT SHIFT*\n"
+                            for o in night_ots: msg += f"🔹 {o.worker.name}: {o.hours} Hours\n"
+                            msg += "\n"
+                        if unassigned_ots:
+                            msg += "❓ *OTHER / UNASSIGNED*\n"
+                            for o in unassigned_ots: msg += f"🔹 {o.worker.name}: {o.hours} Hours\n"
+
+                    msg += f"\nThank you,\n{settings.operator_name}"
+                    
+                    st.info("Message Preview:")
+                    st.text(msg)
+                    
+                    # Create WhatsApp Link
+                    encoded_msg = urllib.parse.quote(msg)
+                    wa_url = f"https://wa.me/{admin_settings.engineer_whatsapp}?text={encoded_msg}"
+                    st.link_button("🟢 CLICK HERE TO OPEN WHATSAPP & SEND", wa_url, use_container_width=True)
 
 elif menu == "⚙️ SETTINGS":
     st.title("Settings")
